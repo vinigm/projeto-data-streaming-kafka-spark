@@ -1,0 +1,9 @@
+# Requisitos do Coletor Bluesky (para rodar fora do Docker)
+atproto>=0.0.40
+kafka-python>=2.0.2
+
+# Requisitos do Processador Spark (para rodar dentro do container Spark)
+# Instalar com: docker exec -it spark-master pip install -r requirements.txt
+torch>=2.0.0
+transformers>=4.30.0
+pyspark>=3.5.0

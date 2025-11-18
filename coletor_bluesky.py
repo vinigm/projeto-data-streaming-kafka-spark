@@ -1,5 +1,6 @@
 import json
 import time
+import re
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
 
@@ -10,59 +11,17 @@ from atproto import (
     CAR,
     models
 )
-# (Não precisamos mais do libipld ou cbor!)
+# (Import da libipld não é mais necessário aqui se usarmos o 'record' direto)
 # --------------------
 
 # --- Configuração ---
-# Keywords organizadas por categorias semânticas para análise mais robusta
-KEYWORDS_OPERACAO = [
-    'operação', 'operacao', 'operacão', 'megaoperação', 'mega operação',
-    'blitz', 'ação policial', 'acao policial', 'incursão', 'incursao',
-    'invasão', 'invasao', 'cerco', 'batida'
-]
+# O filtro agora é APENAS 'bope'
+ALL_KEYWORDS = ['bope']
 
-KEYWORDS_POLICIA = [
-    'polícia', 'policia', 'pm', 'pmerj', 'policial', 'policiais',
-    'bope', 'core', 'choque', 'militar', 'militares', 'batalhão', 'batalhao',
-    'caveirão', 'caveirao', 'blindado', 'viatura', 'prf', 'pcerj'
-]
-
-KEYWORDS_VIOLENCIA = [
-    'tiroteio', 'tiro', 'tiros', 'bala perdida', 'bala',
-    'confronto', 'guerra', 'fogo cruzado', 'troca de tiros',
-    'baleado', 'ferido', 'morto', 'vítima', 'vitima', 'morte',
-    'disparos', 'trocação', 'trocacao', 'fuzil', 'armamento'
-]
-
-KEYWORDS_ATORES = [
-    'traficante', 'traficantes', 'bandido', 'bandidos', 'criminoso', 'criminosos',
-    'facção', 'faccao', 'milícia', 'milicia', 'miliciano',
-    'cv', 'tcp', 'adp', 'comando vermelho', 'terceiro comando'
-]
-
-KEYWORDS_LOCAIS = [
-    'favela', 'comunidade', 'morro', 'complexo',
-    'alemão', 'alemao', 'rocinha', 'maré', 'mare',
-    'jacarezinho', 'cidade de deus', 'penha', 'pavão', 'pavao',
-    'vigário geral', 'vigario', 'acari', 'manguinhos'
-]
-
-KEYWORDS_REACAO = [
-    'medo', 'pânico', 'panico', 'desespero', 'terror', 'susto',
-    'correria', 'socorro', 'helicóptero', 'helicoptero', 'caveirão',
-    'escola fechada', 'comércio fechado', 'comercio fechado',
-    'trânsito interditado', 'transito', 'pista bloqueada'
-]
-
-# Combinar todas as keywords em uma lista única para filtragem
-KEYWORDS = (
-    KEYWORDS_OPERACAO + 
-    KEYWORDS_POLICIA + 
-    KEYWORDS_VIOLENCIA + 
-    KEYWORDS_ATORES + 
-    KEYWORDS_LOCAIS + 
-    KEYWORDS_REACAO
-)
+# Criar um padrão RegEx para "Whole Word Matching"
+# \b(bope)\b vai pegar "BOPE" ou "bope", mas não "bopest"
+KEYWORD_PATTERN = re.compile(r'\b(' + '|'.join(re.escape(k) for k in ALL_KEYWORDS) + r')\b', re.IGNORECASE)
+# -----------------------------------------------------------
 
 KAFKA_TOPIC = 'posts_bluesky'
 KAFKA_SERVER = 'localhost:9092'
@@ -102,39 +61,33 @@ def on_message_handler(message):
         if op.action == 'create' and op.path.startswith('app.bsky.feed.post'):
             
             try:
-                # --- A CORREÇÃO ESTÁ AQUI ---
-                # A variável 'record' já é o dicionário que queremos!
                 record = car.blocks.get(op.cid)
                 if not record:
                     continue
                 
-                # A linha de decodificação (que causava o erro) FOI REMOVIDA.
-                # --- FIM DA CORREÇÃO ---
+                # --- NOVO FILTRO DE IDIOMA ---
+                post_langs = record.get('langs', []) 
                 
-                post_text = record.get('text', '').lower()
+                # Se 'pt' (Português) NÃO ESTIVER na lista, pulamos o post.
+                if 'pt' not in post_langs:
+                    continue 
+                # --- FIM DO FILTRO DE IDIOMA ---
+
+                post_text = record.get('text', '') 
                 
-                if any(keyword in post_text for keyword in KEYWORDS):
+                # Aplicamos nosso filtro de 'bope'
+                if KEYWORD_PATTERN.search(post_text):
                     
-                    # Identificar categorias presentes no post
-                    categorias = {
-                        'operacao': any(k in post_text for k in KEYWORDS_OPERACAO),
-                        'policia': any(k in post_text for k in KEYWORDS_POLICIA),
-                        'violencia': any(k in post_text for k in KEYWORDS_VIOLENCIA),
-                        'atores': any(k in post_text for k in KEYWORDS_ATORES),
-                        'locais': any(k in post_text for k in KEYWORDS_LOCAIS),
-                        'reacao': any(k in post_text for k in KEYWORDS_REACAO)
-                    }
-                    
-                    print(f"\n== POST FILTRADO ENCONTRADO ==")
+                    print(f"\n== POST FILTRADO ENCONTRADO (v10 - BOPE) ==")
                     print(f"Usuário: {commit.repo}")
                     print(f"Texto: {record.get('text')}")
-                    print(f"Categorias: {[k for k, v in categorias.items() if v]}")
                     
+                    # --- JSON SIMPLIFICADO ---
+                    # Removemos as categorias
                     post_data = {
                         'timestamp_iso': record.get('createdAt'),
                         'user_did': commit.repo,
-                        'text': record.get('text'),
-                        'categorias': categorias
+                        'text': record.get('text')
                     }
                     
                     producer.send(KAFKA_TOPIC, post_data)
@@ -147,7 +100,7 @@ def on_message_handler(message):
 
 # --- Ponto de Partida do Script ---
 if __name__ == "__main__":
-    print("Iniciando o Coletor do Bluesky (v6 - Final)...")
+    print("Iniciando o Coletor do Bluesky (v10 - Apenas BOPE)...")
     
     producer = create_kafka_producer()
     

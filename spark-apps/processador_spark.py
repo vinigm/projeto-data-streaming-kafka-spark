@@ -1,7 +1,8 @@
 import sys
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, udf
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, BooleanType, MapType
+# --- MUDANÇA: Não precisamos mais do MapType ou BooleanType ---
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import warnings
@@ -11,18 +12,15 @@ warnings.filterwarnings('ignore')
 KAFKA_TOPIC = "posts_bluesky"
 KAFKA_SERVER = "kafka:29092"
 SPARK_MASTER_URL = "spark://spark-master:7077"
-
-# Modelo BERT para análise de sentimento em português brasileiro
-# Opções de modelos (escolha um):
-# 1. "neuralmind/bert-base-portuguese-cased" - Modelo geral PT-BR
-# 2. "lxyuan/distilbert-base-multilingual-cased-sentiments-student" - Mais rápido, multilíngue
-# 3. "cardiffnlp/twitter-xlm-roberta-base-sentiment" - Treinado em tweets
 BERT_MODEL = "lxyuan/distilbert-base-multilingual-cased-sentiments-student"
+
+PATH_SAIDA_JSON = "/opt/spark/dados_saida/json"
+PATH_CHECKPOINT = "/opt/spark/checkpoint/analise"
 # --------------------
 
 def get_spark_session():
     """
-    Cria e configura a sessão Spark com recursos aumentados para ML.
+    Cria e configura a sessão Spark.
     """
     kafka_pkg_version = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
 
@@ -31,8 +29,7 @@ def get_spark_session():
             SparkSession.builder
             .appName("AnaliseSentimentoBERT_Bluesky")
             .master(SPARK_MASTER_URL)
-            .config("spark.jars.packages", kafka_pkg_version)
-            # Aumentar memória para lidar com modelo BERT
+            .config("spark.jars.packages", kafka_pkg_version) 
             .config("spark.executor.memory", "4g")
             .config("spark.driver.memory", "4g")
             .getOrCreate()
@@ -46,112 +43,64 @@ def get_spark_session():
 
 
 # --- CARREGAMENTO DO MODELO BERT ---
-# Carregar modelo e tokenizer uma única vez (não dentro da UDF)
 print(f"Carregando modelo BERT: {BERT_MODEL}")
 try:
     tokenizer = AutoTokenizer.from_pretrained(BERT_MODEL)
     model = AutoModelForSequenceClassification.from_pretrained(BERT_MODEL)
-    model.eval()  # Modo de inferência (não treinamento)
-    
-    # Verificar se GPU está disponível
+    model.eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     print(f"Modelo carregado com sucesso! Usando device: {device}")
 except Exception as e:
     print(f"ERRO ao carregar modelo BERT: {e}")
-    print("Certifique-se de ter instalado: pip install transformers torch")
     sys.exit(1)
-
+# ------------------------------------
 
 def perform_sentiment_analysis_bert(text):
     """
-    Análise de sentimento usando modelo Transformer BERT.
-    Retorna: POSITIVO, NEUTRO ou NEGATIVO
+    Análise de sentimento base usando o modelo Transformer BERT.
     """
     if text is None or text.strip() == "":
         return "NEUTRO"
     
     try:
-        # Limitar tamanho do texto (BERT tem limite de 512 tokens)
-        text = text[:512]
-        
-        # Tokenizar o texto
-        inputs = tokenizer(
-            text, 
-            return_tensors="pt", 
-            truncation=True, 
-            max_length=512,
-            padding=True
-        )
-        
-        # Mover para GPU se disponível
+        text = text[:512] 
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         
-        # Inferência (sem calcular gradientes)
         with torch.no_grad():
             outputs = model(**inputs)
         
-        # Converter logits em probabilidades
         probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
         sentiment_idx = torch.argmax(probs, dim=-1).item()
-        confidence = probs[0][sentiment_idx].item()
         
-        # Mapeamento de índices para labels
-        # O modelo "lxyuan/distilbert-base-multilingual-cased-sentiments-student" usa:
-        # 0: negativo, 1: neutro, 2: positivo
         labels_map = {0: "NEGATIVO", 1: "NEUTRO", 2: "POSITIVO"}
         sentiment = labels_map.get(sentiment_idx, "NEUTRO")
         
-        print(f"[BERT] Sentimento: {sentiment} (confiança: {confidence:.2%})")
         return sentiment
         
     except Exception as e:
-        print(f"ERRO na análise de sentimento: {e}")
+        print(f"ERRO na análise BERT: {e}")
         return "NEUTRO"
 
-
-def perform_sentiment_analysis_hybrid(text, categorias):
-    """
-    Análise híbrida: Regras de domínio + BERT.
-    Para casos específicos que você conhece o contexto, aplicamos regras.
-    Para o resto, delegamos ao BERT.
-    """
-    if text is None:
-        return "NEUTRO"
-    
-    text_lower = text.lower()
-    
-    # REGRA 1: Menção de vítimas civis sempre é muito negativo
-    if any(term in text_lower for term in ["criança morta", "crianca morta", "bala perdida", "vítima inocente", "vitima inocente"]):
-        return "MUITO_NEGATIVO"
-    
-    # REGRA 2: Ironia/sarcasmo com emojis (heurística simples)
-    if "👏" in text and any(term in text_lower for term in ["parabéns", "parabens", "ótimo", "otimo"]):
-        return "NEGATIVO"  # Provavelmente ironia
-    
-    # REGRA 3: Contextos claramente positivos
-    if any(term in text_lower for term in ["preso", "apreendeu", "prisão bem-sucedida", "salvou"]):
-        return "POSITIVO"
-    
-    # Senão, usar o modelo BERT
-    return perform_sentiment_analysis_bert(text)
+# --- REMOVEMOS A FUNÇÃO HÍBRIDA (pois ela dependia de 'categorias') ---
 
 def process_stream(spark):
     """
-    Função principal que lê do Kafka e processa os dados com BERT.
+    Função principal que lê do Kafka e processa os dados.
     """
     print(f"--- Lendo do tópico Kafka: {KAFKA_TOPIC} ---")
     
     try:
-        # Esquema atualizado com categorias
+        # 1. Definir o esquema SIMPLIFICADO (sem 'categorias')
         schema = StructType([
             StructField("timestamp_iso", StringType(), True),
             StructField("user_did", StringType(), True),
-            StructField("text", StringType(), True),
-            StructField("categorias", MapType(StringType(), BooleanType()), True)
+            StructField("text", StringType(), True)
+            # StructField("categorias", ...) FOI REMOVIDO
         ])
 
-        # Ler o stream do Kafka
+        # 2. Ler o stream do Kafka (sem mudanças)
         df_kafka = (
             spark.readStream
             .format("kafka")
@@ -161,43 +110,36 @@ def process_stream(spark):
             .load()
         )
 
-        # Converter dados binários para JSON
-        df_json = df_kafka.select(
-            col("value").cast("string").alias("json_value")
-        )
+        # 3. Converter e Parsear JSON (sem mudanças)
+        df_json = df_kafka.select(col("value").cast("string").alias("json_value"))
+        df_posts = df_json.select(from_json(col("json_value"), schema).alias("data")).select("data.*")
 
-        # Parsear JSON
-        df_posts = df_json.select(
-            from_json(col("json_value"), schema).alias("data")
-        ).select("data.*")
-
-        # Aplicar análise de sentimento com BERT
-        # IMPORTANTE: usar perform_sentiment_analysis_bert para apenas BERT
-        # ou perform_sentiment_analysis_hybrid para regras + BERT
+        # 4. Registrar a UDF (agora só podemos usar a BERT pura)
         sentiment_udf = udf(perform_sentiment_analysis_bert, StringType())
         
+        # 5. Aplicar a UDF (agora só passamos o 'text')
         df_sentimento = df_posts.withColumn(
             "sentimento", sentiment_udf(col("text"))
         )
         
-        # Exibir resultados no console
+        # 6. Salvar em JSON (removendo 'categorias' da seleção)
         query = (
             df_sentimento
-            .select("timestamp_iso", "user_did", "text", "categorias", "sentimento")
+            .select("timestamp_iso", "text", "sentimento") # Coluna 'categorias' removida
             .writeStream
             .outputMode("append")
-            .format("console")
-            .option("truncate", "false")
+            .format("json")
+            .path(PATH_SAIDA_JSON)
+            .option("checkpointLocation", PATH_CHECKPOINT)
+            .trigger(processingTime='1 minute')
             .start()
         )
         
-        print("--- Query de streaming com BERT iniciada! Aguardando dados... ---")
-        print("ATENÇÃO: A primeira análise pode demorar enquanto o modelo é carregado.")
+        print(f"--- Query de streaming iniciada! Salvando JSON em {PATH_SAIDA_JSON} ---")
         query.awaitTermination()
 
     except Exception as e:
         print(f"ERRO no stream do Spark: {e}")
-        print("Verifique se o tópico do Kafka existe e se os dados estão no formato correto.")
 
 # --- Ponto de Partida do Script ---
 if __name__ == "__main__":
